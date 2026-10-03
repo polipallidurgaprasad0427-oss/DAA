@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SmartRoute – DAA Lab</title>
+<style>
+:root{--bg:#eaf0f2;--ink:#12232b;--mute:#5b7079;--line:#c3d0d6;--card:#fff;--acc:#0b6e8a}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 "Trebuchet MS","Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:18px 24px;border-bottom:2px solid var(--ink);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+h1{margin:0;font-size:24px;letter-spacing:.5px}header span{color:var(--mute)}
+main{display:grid;grid-template-columns:260px 1fr 320px;gap:16px;padding:16px;max-width:1500px;margin:auto}
+@media(max-width:1000px){main{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);padding:14px}
+label{display:block;margin:10px 0 3px;font-weight:600}select,input,button{width:100%;padding:8px;font:inherit;border:1px solid var(--ink);background:#fff}
+button{background:var(--ink);color:#fff;cursor:pointer;margin-top:10px}button.alt{background:#fff;color:var(--ink)}button:focus-visible,select:focus-visible{outline:3px solid var(--acc)}
+svg{width:100%;height:auto;background:#f7fafb;border:1px solid var(--line)}
+.road{stroke:#aebdc4;stroke-width:2}.road.chk{stroke:#e0a100;stroke-width:3}.road.blk{stroke:#c0392b;stroke-dasharray:6 5}
+.nd{fill:#fff;stroke:var(--ink);stroke-width:2}.nd.vis{fill:#9fd3e3}.nd.cur{fill:#e0a100}.nd.src{fill:#2a9d57}.nd.fin{fill:var(--acc)}
+.lbl{font-size:12px;fill:var(--ink)}.route{fill:none;stroke-width:5;opacity:.85}
+dl{margin:0;display:grid;grid-template-columns:1fr auto;gap:4px 10px}dt{color:var(--mute)}dd{margin:0;font-weight:700;text-align:right}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left}
+.bar{height:8px;background:var(--acc);margin-top:3px}.note{color:var(--mute);font-size:13px}
+.wide{grid-column:1/-1}.diff{color:#1d7a46;font-weight:700}
+</style></head><body>
+<header><h1>SmartRoute</h1><span>Bus routing as a graph problem: Dijkstra, A*, Greedy and OR-Tools VRP on the same road network</span></header>
+<main>
+<section class="panel" aria-label="Controls">
+<label for="alg">Algorithm</label>
+<select id="alg"><option value="dijkstra">Dijkstra</option><option value="astar">A*</option><option value="greedy">Greedy</option><option value="vrp">VRP / OR-Tools</option></select>
+<label for="n">Pickup points</label><select id="n"><option>5</option><option>10</option><option selected>15</option><option>20</option></select>
+<label for="s">Start</label><select id="s"></select>
+<label for="d">Destination</label><select id="d"></select>
+<label for="cap">Bus capacity</label><input id="cap" type="number" value="15" min="5" max="60">
+<label for="nb">Buses</label><input id="nb" type="number" value="5" min="1" max="10">
+<label for="blk">Blocked road (e.g. P01-P02)</label><input id="blk" placeholder="optional">
+<button id="run">Run algorithm</button><button id="cmp" class="alt">Compare all algorithms</button><button id="opt" class="alt">Before vs after</button><button id="scl" class="alt">Scale test (5–20 pickups)</button>
+<p class="note">Click a road in the map to block it, then run again to reroute.</p>
+</section>
+<section class="panel"><svg id="map" viewBox="0 0 1000 700" role="img" aria-label="Road network graph"></svg></section>
+<section class="panel" id="res" aria-live="polite"><p class="note">Pick an algorithm and run it.</p></section>
+<section class="panel wide" id="out"></section>
+</main>
+<script>
+const $=id=>document.getElementById(id),NS="http://www.w3.org/2000/svg",COL=["#0b6e8a","#c0392b","#7d3c98","#d68910","#1d7a46","#2e4053","#b03a78","#5d6d7e","#a04000","#117864"];
+const CX={dijkstra:["O((V + E) log V)","O(V + E)","Priority queue always expands the closest unsettled node; optimal for non-negative weights."],
+astar:["O(E log V) worst case","O(V)","Orders nodes by f = g + h with Haversine h. Fewer nodes only if the heuristic prunes; compare measured counts."],
+greedy:["O(B · n²)","O(n)","Repeatedly picks the nearest stop that still fits. Fast, but a heuristic with no global-optimality guarantee."],
+vrp:["NP-hard in general","O(n²)","OR-Tools builds a first solution, then improves it by guided local search under capacity constraints."]};
+let G,blocked=[],pos={};
+const q=()=>({pickups:+$("n").value,buses:+$("nb").value,capacity:+$("cap").value,start:$("s").value||null,dest:$("d").value,blocked});
+async function api(p,b){const r=await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});const j=await r.json();if(!r.ok)throw new Error(j.detail||"Request failed");return j}
+function el(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e}
+async function load(){G=await (await fetch("/api/graph?pickups="+$("n").value)).json();
+ const ids=Object.keys(G.nodes);for(const id of["s","d"])$(id).innerHTML=ids.map(i=>`<option>${i}</option>`).join("");
+ $("s").value=ids[ids.length-1];$("d").value="COLLEGE";blocked=[];draw()}
+function draw(routes){const svg=$("map");svg.innerHTML="";const N=G.nodes,v=Object.values(N);
+ const la=v.map(x=>x.lat),lo=v.map(x=>x.lon),a=Math.min(...la),b=Math.max(...la),c=Math.min(...lo),d=Math.max(...lo);
+ for(const k in N)pos[k]=[60+(N[k].lon-c)/(d-c)*880,640-(N[k].lat-a)/(b-a)*580];
+ G.edges.forEach(([x,y])=>{const bl=blocked.some(p=>p.includes(x)&&p.includes(y));
+  const l=el("line",{x1:pos[x][0],y1:pos[x][1],x2:pos[y][0],y2:pos[y][1],class:"road"+(bl?" blk":""),id:`e-${x}-${y}`,style:"cursor:pointer"},svg);
+  l.onclick=()=>{blocked=bl?blocked.filter(p=>!(p.includes(x)&&p.includes(y))):[...blocked,[x,y]];$("blk").value=blocked.map(p=>p.join("-")).join(", ");draw(routes)}});
+ (routes||[]).forEach((r,i)=>el("polyline",{class:"route",stroke:COL[i%COL.length],points:r.path.map(n=>pos[n].join(",")).join(" ")},svg));
+ for(const k in N){const [x,y]=pos[k];if(k==="COLLEGE")el("rect",{x:x-11,y:y-11,width:22,height:22,class:"nd src",id:"n-"+k},svg);
+  else el("circle",{cx:x,cy:y,r:9,class:"nd",id:"n-"+k},svg);
+  const t=el("text",{x:x+13,y:y-11,class:"lbl"},svg);t.textContent=k==="COLLEGE"?"College":k+" ("+N[k].students+")"}}
+const dl=o=>"<dl>"+Object.entries(o).map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join("")+"</dl>";
+function animate(r){return new Promise(done=>{let i=0,prev=null;const t=setInterval(()=>{
+ if(i>=r.trace.length){clearInterval(t);r.path.forEach((n,j)=>{$("n-"+n).setAttribute("class","nd fin");if(j)line(r.path[j-1],n)});return done()}
+ const[ty,a,b]=r.trace[i++];if(ty==="v"){if(prev)$("n-"+prev).setAttribute("class","nd vis");$("n-"+a).setAttribute("class","nd cur");prev=a}
+ else{const e=$(`e-${a}-${b}`)||$(`e-${b}-${a}`);e&&e.classList.add("chk")}},60)})}
+function line(a,b){const e=$(`e-${a}-${b}`)||$(`e-${b}-${a}`);if(e){e.setAttribute("stroke","#0b6e8a");e.setAttribute("stroke-width",6)}}
+function cx(k){const c=CX[k];return `<p><b>Time:</b> ${c[0]} &nbsp; <b>Space:</b> ${c[1]}</p><p class="note">${c[2]}</p>`}
+$("run").onclick=async()=>{const k=$("alg").value;$("res").innerHTML="<p class='note'>Running…</p>";draw();
+ try{const r=await api("/api/algorithms/"+k,q());
+  if(r.trace){await animate(r);$("res").innerHTML=`<h3>${r.algorithm}</h3>`+dl({Path:r.path.join(" → "),"Distance":r.distance_km+" km","Nodes explored":r.nodes_explored,"Edges checked":r.edges_checked,"Execution":r.execution_ms+" ms"})+cx(k)}
+  else{draw(r.routes);$("res").innerHTML=`<h3>${r.algorithm}</h3>`+dl({"Distance":r.total_distance_km+" km","Travel time":r.total_travel_time+" min","Avg wait to pickup":r.average_waiting_minutes+" min","Buses used":r.buses_used,"Students served":r.students_served,"Execution":r.execution_ms+" ms"})+
+   r.routes.map((x,i)=>`<p style="border-left:5px solid ${COL[i%COL.length]};padding-left:8px"><b>${x.bus}</b> (${x.students}/${$("cap").value}) ${x.stops.map(s=>s.node+"×"+s.students).join(" → ")} → College</p>`).join("")+cx(k)}
+ }catch(e){$("res").innerHTML=`<p style="color:#c0392b">${e.message}</p>`}};
+const bars=(rows,key)=>{const m=Math.max(...rows.map(r=>r[key]),1e-9);return rows.map(r=>`<div>${r.name}: ${r[key]}<div class="bar" style="width:${r[key]/m*100}%"></div></div>`).join("")};
+$("cmp").onclick=async()=>{try{const r=await api("/api/algorithms/compare",q());
+ const rows=[["Dijkstra","Shortest path",r.dijkstra,"distance_km","nodes_explored"],["A*","Heuristic shortest path",r.astar,"distance_km","nodes_explored"],
+ ["Greedy","Route construction",r.greedy,"total_distance_km","—"],["VRP","Multi-bus optimization",r.vrp,"total_distance_km","—"]];
+ $("out").innerHTML=`<h3>DAA algorithm analysis</h3><p class="note">Path algorithms: ${r.start} → ${r.dest}. Fleet algorithms: all pickups, same dataset. Every value is measured on this run.</p>
+ <table><tr><th>Algorithm</th><th>Purpose</th><th>Distance (km)</th><th>Time (min)</th><th>Nodes</th><th>Buses</th><th>Avg wait (min)</th><th>Exec (ms)</th></tr>`+
+ rows.map(([n,p,x,dk,nk])=>`<tr><td>${n}</td><td>${p}</td><td>${x[dk]}</td><td>${x.total_travel_time??Math.round(x[dk]/30*60*10)/10}</td><td>${x[nk]??"—"}</td><td>${x.buses_used??1}</td><td>${x.average_waiting_minutes??"—"}</td><td>${x.execution_ms}</td></tr>`).join("")+"</table>"+
+ `<p class="note">Path-algorithm time assumes 30 km/h. Dijkstra vs A* explored ${r.dijkstra.nodes_explored} vs ${r.astar.nodes_explored} nodes here; this can differ on other inputs.</p>`}catch(e){$("out").innerHTML=`<p style="color:#c0392b">${e.message}</p>`}};
+$("opt").onclick=async()=>{try{const r=await api("/api/routes/optimize",q()),b=r.before,a=r.after,df=r.difference;
+ const row=(l,k,u)=>`<tr><td>${l}</td><td>${b[k]} ${u}</td><td>${a[k]} ${u}</td><td class="diff">${df[k]} ${u}</td></tr>`;
+ $("out").innerHTML=`<h3>Before vs after optimization</h3><table><tr><th></th><th>Before (ID-order plan)</th><th>After (VRP)</th><th>Saved</th></tr>`+
+ row("Distance","total_distance_km","km")+row("Avg waiting","average_waiting_minutes","min")+row("Buses used","buses_used","")+row("Travel time","total_travel_time","min")+"</table>";draw(a.routes)}catch(e){$("out").innerHTML=`<p style="color:#c0392b">${e.message}</p>`}};
+$("scl").onclick=async()=>{$("out").innerHTML="<p class='note'>Running 4 sizes…</p>";try{const r=await api("/api/algorithms/scale",q());
+ const m=(k)=>r.map(x=>({name:x.pickups+" pickups",[k]:x[k]}));
+ $("out").innerHTML=`<h3>Measured scaling</h3><table><tr><th>Pickups</th><th>Dijkstra ms / nodes</th><th>A* ms / nodes</th><th>Greedy ms / km / buses</th><th>VRP ms / km / buses</th></tr>`+
+ r.map(x=>`<tr><td>${x.pickups}</td><td>${x.dijkstra_ms} / ${x.dijkstra_nodes}</td><td>${x.astar_ms} / ${x.astar_nodes}</td><td>${x.greedy_ms} / ${x.greedy_km} / ${x.greedy_buses}</td><td>${x.vrp_ms} / ${x.vrp_km} / ${x.vrp_buses}</td></tr>`).join("")+"</table>"+
+ `<h4>VRP route distance (km)</h4>${bars(m("vrp_km"),"vrp_km")}<h4>Greedy route distance (km)</h4>${bars(m("greedy_km"),"greedy_km")}`}catch(e){$("out").innerHTML=`<p style="color:#c0392b">${e.message}</p>`}};
+$("n").onchange=load;load();
+</script></body></html>
